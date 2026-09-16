@@ -58,10 +58,29 @@ export class SandboxInkDexProvider {
   }
 
   async initialize(): Promise<void> {
+    // Every call that touches shared runtime state (interceptors, state,
+    // secure state) is rebound here to carry this source's id, so that
+    // when Global Search initializes and runs many providers concurrently,
+    // one extension's interceptors/state can never bleed into another's
+    // requests. Bundles keep calling these with their original (Paperback
+    // -style) signatures — the sourceId is invisible to extension code.
     const sandboxApplication = {
       ...Application,
       scheduleRequest: (req: any) =>
         Application.scheduleRequest({ ...req, sourceId: this.info.id }),
+      registerInterceptor: (
+        id: string,
+        requestInterceptor: any,
+        responseInterceptor: any
+      ) => Application.registerInterceptor(this.info.id, id, requestInterceptor, responseInterceptor),
+      unregisterInterceptor: (id: string) =>
+        Application.unregisterInterceptor(this.info.id, id),
+      getState: (key: string) => Application.getState(this.info.id, key),
+      setState: (value: unknown, key: string) =>
+        Application.setState(this.info.id, value, key),
+      getSecureState: (key: string) => Application.getSecureState(this.info.id, key),
+      setSecureState: (value: unknown, key: string) =>
+        Application.setSecureState(this.info.id, value, key),
     };
 
     const sandboxGlobals = {
@@ -154,8 +173,13 @@ export class SandboxInkDexProvider {
   // ---- Search ----
 
   async search(filters: SearchFilters, page: number): Promise<SearchResultPage> {
+    // Mirrors resolveSection()'s "no matching section -> empty page" pattern
+    // above: a source that never implemented getSearchResults isn't a search
+    // failure, it's a source with nothing to contribute. Global Search relies
+    // on this — an unsupported source should silently drop out of the
+    // aggregate instead of surfacing as a per-source error.
     if (!this.sourceModule || typeof this.sourceModule.getSearchResults !== "function") {
-      throw new Error(`Source "${this.info.id}" does not support search`);
+      return { tiles: [], hasNextPage: false, page };
     }
     const query = { title: filters.query ?? "", metadata: {} };
     const sortingOption = (await this.getSortingOptions())[0];

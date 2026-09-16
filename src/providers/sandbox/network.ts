@@ -269,28 +269,41 @@ function extractHost(url: string): string {
 }
 
 class Runtime {
-  private requestInterceptors = new Map<string, RequestInterceptor>();
-  private responseInterceptors = new Map<string, ResponseInterceptor>();
+  // Keyed sourceId -> id -> interceptor. Global Search initializes and runs
+  // every installed provider concurrently, so interceptors/state MUST be
+  // namespaced per source — a flat map here would let one source's
+  // interceptor (or state slot) silently run against another source's
+  // requests whenever more than one provider is active at once, which is
+  // exactly what global search does (single-source browsing never exposed
+  // this because only one provider was ever initialized at a time).
+  private requestInterceptors = new Map<string, Map<string, RequestInterceptor>>();
+  private responseInterceptors = new Map<string, Map<string, ResponseInterceptor>>();
   /** sourceId -> Cookie header value, set by CloudflareWebViewHost. */
   private cookieJar = new Map<string, string>();
 
-  private state = new Map<string, unknown>();
-  private secureState = new Map<string, unknown>();
+  private state = new Map<string, Map<string, unknown>>();
+  private secureState = new Map<string, Map<string, unknown>>();
 
   // ---- interceptors ----
 
   registerInterceptor(
+    sourceId: string,
     id: string,
     requestInterceptor: RequestInterceptor,
     responseInterceptor: ResponseInterceptor
   ) {
-    this.requestInterceptors.set(id, requestInterceptor);
-    this.responseInterceptors.set(id, responseInterceptor);
+    const reqMap = this.requestInterceptors.get(sourceId) ?? new Map();
+    reqMap.set(id, requestInterceptor);
+    this.requestInterceptors.set(sourceId, reqMap);
+
+    const resMap = this.responseInterceptors.get(sourceId) ?? new Map();
+    resMap.set(id, responseInterceptor);
+    this.responseInterceptors.set(sourceId, resMap);
   }
 
-  unregisterInterceptor(id: string) {
-    this.requestInterceptors.delete(id);
-    this.responseInterceptors.delete(id);
+  unregisterInterceptor(sourceId: string, id: string) {
+    this.requestInterceptors.get(sourceId)?.delete(id);
+    this.responseInterceptors.get(sourceId)?.delete(id);
   }
 
   // ---- cookies ----
@@ -305,20 +318,24 @@ class Runtime {
 
   // ---- state ----
 
-  getState<T = unknown>(key: string): T | undefined {
-    return this.state.get(key) as T | undefined;
+  getState<T = unknown>(sourceId: string, key: string): T | undefined {
+    return this.state.get(sourceId)?.get(key) as T | undefined;
   }
 
-  setState<T = unknown>(value: T, key: string) {
-    this.state.set(key, value);
+  setState<T = unknown>(sourceId: string, value: T, key: string) {
+    const m = this.state.get(sourceId) ?? new Map();
+    m.set(key, value);
+    this.state.set(sourceId, m);
   }
 
-  getSecureState<T = unknown>(key: string): T | undefined {
-    return this.secureState.get(key) as T | undefined;
+  getSecureState<T = unknown>(sourceId: string, key: string): T | undefined {
+    return this.secureState.get(sourceId)?.get(key) as T | undefined;
   }
 
-  setSecureState<T = unknown>(value: T, key: string) {
-    this.secureState.set(key, value);
+  setSecureState<T = unknown>(sourceId: string, value: T, key: string) {
+    const m = this.secureState.get(sourceId) ?? new Map();
+    m.set(key, value);
+    this.secureState.set(sourceId, m);
   }
 
   // ---- misc bundle APIs ----
@@ -378,15 +395,24 @@ class Runtime {
       };
     }
 
-    for (const interceptor of this.requestInterceptors.values()) {
-      finalReq = (await interceptor(finalReq)) ?? finalReq;
+    // Only this request's own source's interceptors run against it — see
+    // the note on requestInterceptors above for why this must be scoped.
+    const sid = finalReq.sourceId ?? "";
+    const reqInterceptors = this.requestInterceptors.get(sid);
+    if (reqInterceptors) {
+      for (const interceptor of reqInterceptors.values()) {
+        finalReq = (await interceptor(finalReq)) ?? finalReq;
+      }
     }
 
     const [resp, data] = await this.execute(finalReq);
 
     let finalData = data;
-    for (const interceptor of this.responseInterceptors.values()) {
-      finalData = await interceptor(finalReq, resp, finalData);
+    const resInterceptors = this.responseInterceptors.get(sid);
+    if (resInterceptors) {
+      for (const interceptor of resInterceptors.values()) {
+        finalData = await interceptor(finalReq, resp, finalData);
+      }
     }
 
     if (resp.status === 503 && this.looksLikeCloudflare(resp, finalData)) {
@@ -424,8 +450,10 @@ class Runtime {
     if (clearance) finalHeaders["Cookie"] = clearance;
 
     // Session cookies from the extension's CookieStorageInterceptor
-    // (stored under "cookie_store_cookies" application state key).
-    const storeCookies = this.state.get("cookie_store_cookies") as
+    // (stored under "cookie_store_cookies" application state key, scoped to
+    // this source so concurrent global search doesn't leak one source's
+    // cookies into another's image requests).
+    const storeCookies = this.state.get(sourceId)?.get("cookie_store_cookies") as
       | { name: string; value: string; domain?: string; path?: string; expires?: Date }[]
       | undefined;
     if (Array.isArray(storeCookies) && storeCookies.length > 0) {
@@ -522,19 +550,27 @@ export const Application = {
   decodeHTMLEntities: (input: string) => decodeHTMLEntities(input),
   base64Decode: (value: string) => base64Decode(value),
   getDefaultUserAgent: () => DEFAULT_USER_AGENT,
+  // sourceId-scoped so concurrent (global search) execution across
+  // multiple providers can't cross-contaminate; the per-source sandbox
+  // wrapper in SandboxInkDexProvider injects the sourceId, keeping the
+  // bundle-facing signature (no sourceId argument) unchanged for extensions.
   registerInterceptor: (
+    sourceId: string,
     id: string,
     requestInterceptor: RequestInterceptor,
     responseInterceptor: ResponseInterceptor
-  ) => runtime.registerInterceptor(id, requestInterceptor, responseInterceptor),
-  unregisterInterceptor: (id: string) => runtime.unregisterInterceptor(id),
+  ) => runtime.registerInterceptor(sourceId, id, requestInterceptor, responseInterceptor),
+  unregisterInterceptor: (sourceId: string, id: string) =>
+    runtime.unregisterInterceptor(sourceId, id),
   Selector: (instance: any, methodName: string) =>
     runtime.Selector(instance, methodName),
-  getState: <T = unknown>(key: string) => runtime.getState<T>(key),
-  setState: <T = unknown>(value: T, key: string) => runtime.setState(value, key),
-  getSecureState: <T = unknown>(key: string) => runtime.getSecureState<T>(key),
-  setSecureState: <T = unknown>(value: T, key: string) =>
-    runtime.setSecureState(value, key),
+  getState: <T = unknown>(sourceId: string, key: string) => runtime.getState<T>(sourceId, key),
+  setState: <T = unknown>(sourceId: string, value: T, key: string) =>
+    runtime.setState(sourceId, value, key),
+  getSecureState: <T = unknown>(sourceId: string, key: string) =>
+    runtime.getSecureState<T>(sourceId, key),
+  setSecureState: <T = unknown>(sourceId: string, value: T, key: string) =>
+    runtime.setSecureState(sourceId, value, key),
   sleep: (seconds: number) => runtime.sleep(seconds),
   invalidateDiscoverSections: () => runtime.invalidateDiscoverSections(),
   formDidChange: (id: string) => runtime.formDidChange(id),

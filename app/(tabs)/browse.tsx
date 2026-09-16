@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 import { FlatList, Image, Text, View } from "react-native";
+import { FlashList } from "@shopify/flash-list";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -9,6 +10,7 @@ import { providerRegistry } from "@/services/providerRegistry";
 import { useExtensionsStore } from "@/extensions/extensionStore";
 import { Button, EmptyState, ScreenHeader, SearchBar, SectionLabel, SkeletonList } from "@/components/ui/MD3";
 import { Ripple } from "@/components/ui/Ripple";
+import { Cover } from "@/components/ui/Cover";
 import { useAppTheme } from "@/theme/useAppTheme";
 import { RADIUS } from "@/theme/theme";
 import type { SourceInfo } from "@/domain/models";
@@ -80,11 +82,11 @@ const SearchResultRow = memo(function SearchResultRow({
   return (
     <Ripple onPress={onPress}>
       <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 8, paddingHorizontal: 16 }}>
-        <View style={{ width: 42, height: 60, borderRadius: RADIUS.sm, overflow: "hidden", backgroundColor: theme.surface2 }}>
-          {item.coverUrl ? (
-            <Image source={{ uri: item.coverUrl }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
-          ) : null}
-        </View>
+        {/* Shared Cover component: fadeDuration=0 avoids the Android
+            cross-fade jank on recycled rows, and it fails gracefully instead
+            of leaving a blank box — important once a result list can be
+            dozens of rows across many sources. */}
+        <Cover uri={item.coverUrl} title={item.title} width={42} height={60} radius={RADIUS.sm} />
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text numberOfLines={2} style={{ color: theme.text, fontWeight: "700", fontSize: 14, lineHeight: 18 }}>
             {item.title}
@@ -226,11 +228,12 @@ export default function CatalogsScreen() {
     );
   } else if (hasSearched) {
     body = (
-      <FlatList
+      <FlashList
         data={results}
         keyExtractor={(item) => `${item.sourceId}-${item.mangaId}`}
         contentContainerStyle={{ paddingBottom: 32, flexGrow: 1 }}
         keyboardShouldPersistTaps="handled"
+        removeClippedSubviews
         renderItem={({ item }) => <SearchResultRow item={item} onPress={() => openResult(item)} />}
         ListHeaderComponent={
           searchErrors.length > 0 ? (

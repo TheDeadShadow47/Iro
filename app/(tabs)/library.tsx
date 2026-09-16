@@ -24,6 +24,7 @@ import { LibraryService } from "@/services/LibraryService";
 import { historyRepository } from "@/db/repositories/historyRepository";
 import { progressRepository } from "@/db/repositories/progressRepository";
 import { useSettingsStore } from "@/state/settingsStore";
+import type { LibraryFilterMode, LibrarySortMode } from "@/state/settingsStore";
 import type { LibraryEntry } from "@/domain/models";
 import { useAppTheme } from "@/theme/useAppTheme";
 import { RADIUS, TOUCH } from "@/theme/theme";
@@ -31,8 +32,8 @@ import { RADIUS, TOUCH } from "@/theme/theme";
 const GAP = 12;
 const PADDING = 16;
 
-type FilterMode = "all" | "unread" | "downloaded";
-type SortMode = "title" | "recentlyAdded" | "recentlyUpdated" | "progress";
+type FilterMode = LibraryFilterMode;
+type SortMode = LibrarySortMode;
 
 const FILTERS: { mode: FilterMode; label: string }[] = [
   { mode: "all", label: "All" },
@@ -62,13 +63,18 @@ export default function LibraryScreen() {
   const { width } = useWindowDimensions();
   const columns = useSettingsStore((s) => s.gridColumns);
   const setGridColumns = useSettingsStore((s) => s.setGridColumns);
+  // Library's filter/sort are a user preference (which view of their
+  // library they left it in), not transient UI state — persisted the same
+  // way gridColumns already is, so it survives navigation and app restarts.
+  const filter = useSettingsStore((s) => s.libraryFilter);
+  const setFilter = useSettingsStore((s) => s.setLibraryFilter);
+  const sort = useSettingsStore((s) => s.librarySort);
+  const setSort = useSettingsStore((s) => s.setLibrarySort);
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const [filter, setFilter] = useState<FilterMode>("all");
-  const [sort, setSort] = useState<SortMode>("title");
   const [resume, setResume] = useState<ResumeEntry | null>(null);
 
   const [selecting, setSelecting] = useState(false);

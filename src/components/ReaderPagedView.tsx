@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import {
   FlatList,
   StyleSheet,
@@ -50,18 +50,71 @@ export function ReaderPagedView({
     [rtl, pages]
   );
 
-  const toLogicalIndex = useCallback(
-    (visualIndex: number) => (rtl ? pages.length - 1 - visualIndex : visualIndex),
+  const toVisualIndex = useCallback(
+    (logicalIndex: number) => (rtl ? pages.length - 1 - logicalIndex : logicalIndex),
     [rtl, pages.length]
   );
+
+  // FlatList requires `onViewableItemsChanged` to stay referentially
+  // stable for the life of the list (React Native warns/ignores changes
+  // after mount), so it has to be captured once via `useRef(...).current`.
+  // The catch: a callback captured that way closes over whatever `rtl`,
+  // `pages.length`, and `onPageChange` were on the FIRST render only. If we
+  // read those directly inside the frozen callback, every viewability
+  // event after the first `rtl` toggle would translate the visual index
+  // using the STALE reading direction — silently corrupting the reported
+  // logical page (and therefore reading progress) from that point on. To
+  // avoid that, the frozen callback reads from refs that are kept fresh
+  // on every render instead of closing over the values themselves.
+  const rtlRef = useRef(rtl);
+  const pagesLengthRef = useRef(pages.length);
+  const onPageChangeRef = useRef(onPageChange);
+  const lastLogicalIndexRef = useRef(initialIndex);
+  useEffect(() => {
+    rtlRef.current = rtl;
+    pagesLengthRef.current = pages.length;
+    onPageChangeRef.current = onPageChange;
+  });
 
   const onViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       if (viewableItems.length > 0 && viewableItems[0].index != null) {
-        onPageChange(toLogicalIndex(viewableItems[0].index));
+        const visualIndex = viewableItems[0].index;
+        const logicalIndex = rtlRef.current
+          ? pagesLengthRef.current - 1 - visualIndex
+          : visualIndex;
+        lastLogicalIndexRef.current = logicalIndex;
+        onPageChangeRef.current(logicalIndex);
       }
     }
   ).current;
+
+  // Re-sync scroll position when the reading direction changes mid-chapter
+  // (e.g. the user flips LTR -> RTL while on page 3). `initialScrollIndex`
+  // only takes effect at mount, so without this the list would keep its
+  // current PHYSICAL offset after `displayPages` reverses underneath it —
+  // landing on a different, wrong logical page. This only fires on actual
+  // direction changes, not on mount (where initialScrollIndex already
+  // places the list correctly), and jumps with no animation so it reads as
+  // "already there" rather than a visible page jump.
+  const isFirstRender = useRef(true);
+  useLayoutEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    // Depends only on `rtl` (not `pages.length`/`toVisualIndex`) so this
+    // fires exactly when the reading direction actually changes — reading
+    // the page count from the same ref the viewability handler keeps
+    // fresh, rather than the reactive `pages.length`, avoids re-syncing
+    // scroll on an unrelated page-count change (e.g. a different chapter's
+    // data landing in this same component instance).
+    if (pagesLengthRef.current === 0) return;
+    const visualIndex = rtl
+      ? pagesLengthRef.current - 1 - lastLogicalIndexRef.current
+      : lastLogicalIndexRef.current;
+    listRef.current?.scrollToIndex({ index: visualIndex, animated: false });
+  }, [rtl]);
 
   const renderItem = useCallback(
     ({ item }: { item: ResolvedPage }) => (
@@ -85,7 +138,7 @@ export function ReaderPagedView({
       data={displayPages}
       horizontal
       pagingEnabled
-      initialScrollIndex={rtl ? pages.length - 1 - initialIndex : initialIndex}
+      initialScrollIndex={toVisualIndex(initialIndex)}
       keyExtractor={(_, i) => String(i)}
       getItemLayout={(_, index) => ({
         length: width,
